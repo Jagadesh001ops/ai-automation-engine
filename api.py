@@ -83,7 +83,7 @@ def run_workflow(body: RunRequest, db: Session = Depends(get_db)):
 
     # Step 3: run pipeline
     initial_state = {"document": body.document}
-    final_state = engine.run(plan, initial_state)
+    final_state, traces = engine.run(plan, initial_state)
 
     # Step 4: persist run to database
     run = WorkflowRun(

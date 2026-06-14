@@ -18,7 +18,7 @@ class LLMNode(BaseNode):
         self.input_key = input_key
         self.output_key = output_key
 
-    def execute(self, state: Dict[str, Any]) -> NodeResult:
+    def _execute(self, state: Dict[str, Any]) -> NodeResult:
         text = state.get(self.input_key)
 
         if not text:
@@ -26,24 +26,27 @@ class LLMNode(BaseNode):
                 ValueError(f"'{self.input_key}' not found in state")
             )
 
+        system_msg = f"You are an expert assistant. Your job: {self.description}. Be concise and clear."
+        user_msg = str(text)
+
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
-                {
-                    "role": "system",
-                    "content": f"You are an expert assistant. Your job: {self.description}. Be concise and clear."
-                },
-                {
-                    "role": "user",
-                    "content": str(text)
-                }
+                {"role": "system", "content": system_msg},
+                {"role": "user",   "content": user_msg}
             ]
         )
+
+        output = response.choices[0].message.content
+        input_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
 
         return NodeResult(
             success=True,
             output_key=self.output_key,
-            output_value=response.choices[0].message.content
+            output_value=output,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens
         )
 
 
@@ -109,7 +112,6 @@ def build_node_for_step(name: str, description: str,
                 output_key=output_key
             )
 
-    # No specialist match — use generic node with step description as prompt
     print(f"  → No specialist for '{name}', using generic LLMNode")
     return LLMNode(
         name=name,

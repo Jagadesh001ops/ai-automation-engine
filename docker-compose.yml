@@ -16,7 +16,7 @@ services:
     image: postgres:16
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres123
+      POSTGRES_PASSWORD: 
       POSTGRES_DB: workflow_engine
     ports:
       - "5433:5432"

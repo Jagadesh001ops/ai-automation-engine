@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import List
 
 class WorkflowStep(BaseModel):
@@ -11,3 +11,9 @@ class WorkflowPlan(BaseModel):
     goal: str = Field(description="The user's intent in one clear sentence")
     steps: List[WorkflowStep] = Field(description="Ordered list of workflow steps")
     estimated_steps: int = Field(ge=1, le=10, description="Total number of steps")
+
+    @model_validator(mode="after")
+    def estimated_steps_matches_steps(self):
+        if self.estimated_steps != len(self.steps):
+            raise ValueError("estimated_steps must match the number of steps")
+        return self

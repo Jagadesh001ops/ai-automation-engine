@@ -77,7 +77,7 @@ print("STEP 3: Running pipeline...")
 print("=" * 60)
 
 initial_state = {"document": SAMPLE_DOCUMENT}
-final_state = engine.run(plan, initial_state)
+final_state, traces = engine.run(plan, initial_state)
 
 # ─── Step 4: Print final output ───────────────────────────────────────────────
 

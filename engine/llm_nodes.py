@@ -1,11 +1,19 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from groq import Groq
 from typing import Any, Dict
 from .nodes import BaseNode, NodeResult
+from .config import LLM_MODEL
 
-client = Groq()
+client = None
+
+
+def get_client():
+    global client
+    if client is None:
+        from groq import Groq
+        client = Groq()
+    return client
 
 
 # ─── Generic fallback node ────────────────────────────────────────────────────
@@ -29,8 +37,8 @@ class LLMNode(BaseNode):
         system_msg = f"You are an expert assistant. Your job: {self.description}. Be concise and clear."
         user_msg = str(text)
 
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+        response = get_client().chat.completions.create(
+            model=LLM_MODEL,
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user",   "content": user_msg}
@@ -92,25 +100,49 @@ class GenerateQuizNode(LLMNode):
 
 SPECIALIST_NODES = {
     "summarize": SummarizeNode,
-    "extract":   ExtractConceptsNode,
-    "quiz":      GenerateQuizNode,
-    "generate":  GenerateQuizNode,
+    "summarize_document": SummarizeNode,
+    "summary": SummarizeNode,
+    "extract": ExtractConceptsNode,
+    "extract_concepts": ExtractConceptsNode,
+    "extract_key_concepts": ExtractConceptsNode,
+    "quiz": GenerateQuizNode,
+    "generate_quiz": GenerateQuizNode,
+    "generate_quiz_questions": GenerateQuizNode,
+    "create_quiz": GenerateQuizNode,
 }
+
+SPECIALIST_PREFIXES = (
+    ("summarize_", SummarizeNode),
+    ("summary_", SummarizeNode),
+    ("extract_", ExtractConceptsNode),
+    ("quiz_", GenerateQuizNode),
+    ("generate_quiz_", GenerateQuizNode),
+    ("create_quiz_", GenerateQuizNode),
+)
+
 
 def build_node_for_step(name: str, description: str,
                          input_key: str, output_key: str) -> LLMNode:
     """
     Routes a step to the right node class.
-    Checks if the step name contains a known keyword → specialist node.
+    Uses exact aliases and specific prefixes for specialist nodes.
     Falls back to generic LLMNode if no match found.
     """
-    for keyword, NodeClass in SPECIALIST_NODES.items():
-        if keyword in name.lower():
-            return NodeClass(
-                name=name,
-                input_key=input_key,
-                output_key=output_key
-            )
+    normalized_name = name.strip().lower().replace("-", "_")
+
+    NodeClass = SPECIALIST_NODES.get(normalized_name)
+    if NodeClass is None:
+        for prefix, PrefixNodeClass in SPECIALIST_PREFIXES:
+            if normalized_name.startswith(prefix):
+                NodeClass = PrefixNodeClass
+                break
+
+    if NodeClass is not None:
+        return NodeClass(
+            name=name,
+            input_key=input_key,
+            output_key=output_key
+        )
 
     print(f"  → No specialist for '{name}', using generic LLMNode")
     return LLMNode(

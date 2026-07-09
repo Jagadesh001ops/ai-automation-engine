@@ -1,11 +1,19 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from groq import Groq
 from .schemas import WorkflowPlan, WorkflowStep
+from .config import LLM_MODEL
 import json
 
-client = Groq()
+client = None
+
+
+def get_client():
+    global client
+    if client is None:
+        from groq import Groq
+        client = Groq()
+    return client
 
 SYSTEM_PROMPT = """You are an AI workflow planner.
 Analyse the user's document-processing request and break it into an ordered sequence of workflow steps.
@@ -33,12 +41,13 @@ Rules:
 
 
 def parse_intent(user_request: str) -> WorkflowPlan:
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+    response = get_client().chat.completions.create(
+        model=LLM_MODEL,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_request}
-        ]
+        ],
+        response_format={"type": "json_object"}
     )
 
     raw = response.choices[0].message.content

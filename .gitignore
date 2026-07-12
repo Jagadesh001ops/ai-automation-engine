@@ -2,6 +2,7 @@ venv/
 .env
 __pycache__/
 *.pyc
+*.log
 .agents/
 .claude/
 .pytest_cache/

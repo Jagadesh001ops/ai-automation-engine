@@ -2,6 +2,10 @@ venv/
 .env
 __pycache__/
 *.pyc
+.agents/
+.claude/
+.pytest_cache/
+.vscode/
 .git/
 docker-compose.yml
 docker-compose*.yml

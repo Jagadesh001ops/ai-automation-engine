@@ -42,7 +42,7 @@
 **Files touched:** `docker-compose.yml`, `requirements.txt`, `tests/conftest.py`, new `engine/embeddings.py`.
 **Definition of done:** `docker-compose up` brings up app + db (with pgvector) + redis; `pytest` runs and passes against mocked Groq calls, zero live API calls made.
 **Reflection:**
->
+> Decision: used the existing Postgres service, just swapped `postgres:16` for `pgvector/pgvector:pg16` — no dedicated service. This keeps docker-compose simpler; if pgvector and the app ever need to be on different hardware, splitting is cheap later. Added a `worker` service alongside `app` so ARQ tasks run in their own container without competing with FastAPI for CPU. `engine/embeddings.py` uses `all-MiniLM-L6-v2` via sentence-transformers — 22 MB, runs entirely on-device, no API key. `engine/jobs.py` has a trivial `ping` task to confirm ARQ is wired end-to-end before Day 5 adds real ingestion jobs. `tests/conftest.py` provides `mock_groq` by patching both `engine.intent_parser.get_client` and `engine.llm_nodes.get_client` — the lazy-init pattern (global client initialised on first call) means patching the factory function is the right intercept point, not the class itself. All 8 tests pass, zero live API calls. Key interview point: mocking at the factory function level rather than patching `groq.Groq` directly means the mock works regardless of how many modules import the client.
 
 ### Day 3 — Document upload + text extraction + OCR trigger
 **Goal:** accept a PDF or text upload and reliably get text out of it, including scanned pages.

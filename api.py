@@ -11,8 +11,10 @@ from sqlalchemy.orm import Session
 from engine.intent_parser import parse_intent
 from engine.execution_engine import ExecutionEngine
 from engine.llm_nodes import build_node_for_step
-from engine.database import SessionLocal, WorkflowRun, init_db
+from engine.database import SessionLocal, WorkflowRun, init_db, get_or_create_document, store_chunks
 from engine.ingestion import ingest, IngestionError, ExtractionError
+from engine.chunking import chunk_text
+from engine.embeddings import embed_batch
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="AI Workflow Engine", version="1.0.0")
@@ -77,15 +79,42 @@ async def upload_document(file: UploadFile = File(...)):
     except ExtractionError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
+    # Chunk + embed + store (deduped by content hash)
+    import hashlib
+    content_hash = hashlib.sha256(data).hexdigest()
+    chunks = chunk_text(result.text)
+    texts = [c.text for c in chunks]
+    embeddings = embed_batch(texts) if texts else []
+
+    db = SessionLocal()
+    try:
+        doc, created = get_or_create_document(
+            db,
+            filename=result.filename,
+            content_type=result.content_type,
+            size_bytes=result.size_bytes,
+            page_count=result.page_count,
+            char_count=result.char_count,
+            content_hash=content_hash,
+        )
+        new_chunks = store_chunks(db, doc.id, chunks, embeddings) if created else 0
+        db.commit()
+        doc_id = doc.id
+    finally:
+        db.close()
+
     return {
+        "document_id": doc_id,
+        "created": created,
         "filename": result.filename,
         "content_type": result.content_type,
         "size_bytes": result.size_bytes,
         "page_count": result.page_count,
         "char_count": result.char_count,
+        "chunk_count": len(chunks),
+        "new_chunks": new_chunks,
         "ocr_pages": result.ocr_pages,
         "ocr_skipped_pages": result.ocr_skipped_pages,
-        "text": result.text,
     }
 
 

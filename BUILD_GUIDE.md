@@ -82,7 +82,7 @@
 **Files touched:** new `engine/jobs.py` (ARQ worker), `api.py`, `engine/database.py`.
 **Definition of done:** upload a document, poll its status, watch it move `processing → ready`; deliberately break extraction (corrupt file) and confirm it lands on `failed` with a real error message, not stuck on `processing`.
 **Reflection:**
->
+> `POST /documents` now returns 202 immediately: it validates + extracts synchronously (so the caller gets a real 415/413/422 for bad files rather than finding out later), creates the `Document` row with `status="processing"`, enqueues `ingest_document` via ARQ, and returns `{document_id, status: "processing"}`. The heavy work (chunk → embed → store) runs in the worker container. Two new endpoints handle polling: `GET /documents` lists all documents, `GET /documents/{id}` returns the current status. The job updates the row to `status="ready"` on success or `status="failed"` (with `error_message`) on any error — so a stuck `processing` row is impossible without a dead worker process. The sync fallback (when Redis is unavailable) makes local development without Docker work without any code changes. Key patch location: since `ingest_document` uses local imports, tests patch at the source modules (`engine.database.SessionLocal`, `engine.embeddings.embed_batch`) not at `engine.jobs.*`. 33 tests pass.
 
 ---
 

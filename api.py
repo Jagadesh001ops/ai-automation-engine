@@ -11,10 +11,8 @@ from sqlalchemy.orm import Session
 from engine.intent_parser import parse_intent
 from engine.execution_engine import ExecutionEngine
 from engine.llm_nodes import build_node_for_step
-from engine.database import SessionLocal, WorkflowRun, init_db, get_or_create_document, store_chunks
+from engine.database import SessionLocal, WorkflowRun, Document, init_db, get_or_create_document
 from engine.ingestion import ingest, IngestionError, ExtractionError
-from engine.chunking import chunk_text
-from engine.embeddings import embed_batch
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="AI Workflow Engine", version="1.0.0")
@@ -64,9 +62,30 @@ class RunResponse(BaseModel):
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
-@app.post("/documents")
+def _redis_pool():
+    """Lazy ARQ Redis pool — returns None when Redis is unavailable so the
+    rest of the API still works without a running Redis instance."""
+    import os
+    from arq.connections import create_pool, RedisSettings
+    url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    url = url.removeprefix("redis://")
+    host, _, port_str = url.partition(":")
+    settings = RedisSettings(host=host, port=int(port_str) if port_str else 6379)
+    return create_pool(settings)
+
+
+@app.post("/documents", status_code=202)
 async def upload_document(file: UploadFile = File(...)):
-    data = await file.read(26 * 1024 * 1024)  # read up to 26 MB to detect oversize
+    """Validate + extract synchronously, then enqueue the chunk/embed/store job.
+
+    Returns immediately with document_id and status='processing'.
+    Poll GET /documents/{id} to watch the status change to 'ready' or 'failed'.
+    """
+    import hashlib
+
+    data = await file.read(26 * 1024 * 1024)
+
+    # Validate type/size eagerly — no point enqueuing a job for a GIF
     try:
         result = ingest(
             data=data,
@@ -74,17 +93,12 @@ async def upload_document(file: UploadFile = File(...)):
             content_type=file.content_type or "",
         )
     except IngestionError as exc:
-        status = 413 if "25 MB" in str(exc) else 415
-        raise HTTPException(status_code=status, detail=str(exc))
+        http_status = 413 if "25 MB" in str(exc) else 415
+        raise HTTPException(status_code=http_status, detail=str(exc))
     except ExtractionError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
-    # Chunk + embed + store (deduped by content hash)
-    import hashlib
     content_hash = hashlib.sha256(data).hexdigest()
-    chunks = chunk_text(result.text)
-    texts = [c.text for c in chunks]
-    embeddings = embed_batch(texts) if texts else []
 
     db = SessionLocal()
     try:
@@ -97,25 +111,99 @@ async def upload_document(file: UploadFile = File(...)):
             char_count=result.char_count,
             content_hash=content_hash,
         )
-        new_chunks = store_chunks(db, doc.id, chunks, embeddings) if created else 0
+        if created:
+            doc.status = "processing"
         db.commit()
         doc_id = doc.id
+        doc_status = doc.status
     finally:
         db.close()
 
+    # Enqueue background job only for newly created documents
+    if created:
+        try:
+            redis = await _redis_pool()
+            await redis.enqueue_job("ingest_document", document_id=doc_id, raw_bytes=data)
+            await redis.aclose()
+        except Exception as exc:
+            # Redis unavailable — fall back to synchronous processing
+            import logging
+            logging.getLogger(__name__).warning(
+                "Redis unavailable (%s), processing synchronously", exc
+            )
+            from engine.chunking import chunk_text
+            from engine.embeddings import embed_batch
+            from engine.database import store_chunks
+            chunks = chunk_text(result.text)
+            embeddings = embed_batch([c.text for c in chunks]) if chunks else []
+            db2 = SessionLocal()
+            try:
+                store_chunks(db2, doc_id, chunks, embeddings)
+                doc2 = db2.query(Document).filter_by(id=doc_id).first()
+                if doc2:
+                    doc2.status = "ready"
+                    doc2.page_count = result.page_count
+                    doc2.char_count = result.char_count
+                db2.commit()
+                doc_status = "ready"
+            finally:
+                db2.close()
+
     return {
         "document_id": doc_id,
+        "status": doc_status,
         "created": created,
         "filename": result.filename,
         "content_type": result.content_type,
         "size_bytes": result.size_bytes,
-        "page_count": result.page_count,
-        "char_count": result.char_count,
-        "chunk_count": len(chunks),
-        "new_chunks": new_chunks,
-        "ocr_pages": result.ocr_pages,
-        "ocr_skipped_pages": result.ocr_skipped_pages,
     }
+
+
+@app.get("/documents")
+def list_documents():
+    """Return all documents ordered newest-first."""
+    db = SessionLocal()
+    try:
+        docs = db.query(Document).order_by(Document.created_at.desc()).all()
+        return [
+            {
+                "document_id": d.id,
+                "filename": d.filename,
+                "content_type": d.content_type,
+                "size_bytes": d.size_bytes,
+                "page_count": d.page_count,
+                "char_count": d.char_count,
+                "status": d.status,
+                "error_message": d.error_message,
+                "created_at": d.created_at,
+            }
+            for d in docs
+        ]
+    finally:
+        db.close()
+
+
+@app.get("/documents/{document_id}")
+def get_document(document_id: int):
+    """Return status and metadata for a single document."""
+    db = SessionLocal()
+    try:
+        doc = db.query(Document).filter_by(id=document_id).first()
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return {
+            "document_id": doc.id,
+            "filename": doc.filename,
+            "content_type": doc.content_type,
+            "size_bytes": doc.size_bytes,
+            "page_count": doc.page_count,
+            "char_count": doc.char_count,
+            "status": doc.status,
+            "error_message": doc.error_message,
+            "created_at": doc.created_at,
+        }
+    finally:
+        db.close()
 
 
 @app.get("/health")

@@ -7,6 +7,14 @@ should use this fixture (or a fixture that depends on it).
 """
 from __future__ import annotations
 
+import pathlib
+import sys
+
+# Ensure the worktree's engine package takes priority over the main repo's.
+_worktree_root = str(pathlib.Path(__file__).parent.parent)
+if _worktree_root not in sys.path:
+    sys.path.insert(0, _worktree_root)
+
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 

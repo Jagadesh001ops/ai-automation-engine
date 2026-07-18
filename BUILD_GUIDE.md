@@ -56,7 +56,7 @@
 **Files touched:** new `engine/ingestion.py`, `api.py` (new `/documents` upload route).
 **Definition of done:** uploading a normal OpenStax chapter PDF and a deliberately scanned/image-only page both produce usable extracted text; an oversized or corrupt file produces a clear error, not a crash.
 **Reflection:**
->
+> `engine/ingestion.py` is the single entry point: one `ingest(data, filename, content_type)` function that validates type and size first, then delegates to `_extract_pdf` or `_extract_text_file`. Pdfplumber handles text-layer PDFs; any page whose extracted text falls under 100 characters is attempted with Tesseract OCR — and if Tesseract isn't installed (common on Windows), the page goes into `ocr_skipped_pages` rather than crashing. Two exception types keep the mapping clean: `IngestionError` (4xx — bad type, oversized, empty) vs `ExtractionError` (422 — valid file, unreadable). The `/documents` POST endpoint maps these to HTTP 415/413/422 respectively. The tricky path-priority bug: when pytest ran from the main repo root, Python found the main `engine/` package first on `sys.path`, which lacked `ingestion.py` — fixed by inserting the worktree root at `sys.path[0]` in `tests/conftest.py`. All 17 tests pass. Key interview point: separating validation errors (IngestionError) from extraction errors (ExtractionError) makes the API contract explicit — clients know whether to show "wrong file type" vs. "file unreadable" without parsing error strings.
 
 ### Day 4 — Chunking + embeddings + pgvector storage
 **Goal:** turn extracted text into retrievable, embedded chunks.

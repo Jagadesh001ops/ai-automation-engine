@@ -1,14 +1,14 @@
-"""pgvector similarity search for retrieved-chunk retrieval (Day 8).
-
-retrieve_chunks() embeds the query with the same model used at ingest time
-(all-MiniLM-L6-v2) then runs a cosine-distance search over DocumentChunk rows.
-"""
+"""pgvector similarity search for retrieved-chunk retrieval (Day 8)."""
 from __future__ import annotations
-
 from typing import List, Optional
-
 from .database import DocumentChunk, SessionLocal
 from .embeddings import embed
+
+try:
+    from pgvector.sqlalchemy import Vector as _Vec
+    _HAS_PGVECTOR = True
+except ImportError:
+    _HAS_PGVECTOR = False
 
 
 def retrieve_chunks(
@@ -16,29 +16,18 @@ def retrieve_chunks(
     document_id: Optional[int] = None,
     top_k: int = 5,
 ) -> List[dict]:
-    """Return the *top_k* most relevant chunks for *query*.
+    """Return the top_k most relevant chunks for query.
 
-    Args:
-        query:       Natural-language query to embed and search.
-        document_id: If given, restrict search to chunks from this document.
-        top_k:       Maximum number of chunks to return.
-
-    Returns:
-        List of dicts ordered by relevance (closest first):
-        {chunk_id, document_id, text, char_start, char_end, score}
-        where score is cosine distance (lower = more similar).
+    Returns list of {chunk_id, document_id, text, char_start, char_end, score}.
+    score is cosine distance (lower = more similar), 0.0 in fallback mode.
     """
-    try:
-        from pgvector.sqlalchemy import Vector
-        _HAS_PGVECTOR = True
-    except ImportError:
-        _HAS_PGVECTOR = False
+    import engine.retrieval_node as _self
+    has_pgvec = getattr(_self, "_HAS_PGVECTOR", _HAS_PGVECTOR)
 
     query_vec = embed(query)
-
     db = SessionLocal()
     try:
-        if _HAS_PGVECTOR:
+        if has_pgvec:
             q = db.query(
                 DocumentChunk,
                 DocumentChunk.embedding.cosine_distance(query_vec).label("score"),
@@ -59,7 +48,6 @@ def retrieve_chunks(
                 for chunk, score in rows
             ]
         else:
-            # Fallback when pgvector not available: return most recent chunks
             q = db.query(DocumentChunk)
             if document_id is not None:
                 q = q.filter(DocumentChunk.document_id == document_id)

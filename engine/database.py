@@ -27,13 +27,14 @@ class Document(Base):
     __table_args__ = {"extend_existing": True}
 
     id            = Column(Integer, primary_key=True, index=True)
+    user_id       = Column(String, nullable=True, index=True)   # auth user — null = pre-auth rows
     filename      = Column(String, nullable=False)
     content_type  = Column(String, nullable=False)
     size_bytes    = Column(Integer, nullable=False)
     page_count    = Column(Integer, nullable=True)
     char_count    = Column(Integer, nullable=True)
-    content_hash  = Column(String(64), nullable=False, unique=True, index=True)
-    status        = Column(String, default="ready")   # ready | failed
+    content_hash  = Column(String(64), nullable=False, index=True)  # unique per user
+    status        = Column(String, default="ready")   # processing | ready | failed
     error_message = Column(Text, nullable=True)
     created_at    = Column(DateTime, default=datetime.utcnow)
 
@@ -59,6 +60,7 @@ class WorkflowRun(Base):
     __table_args__ = {"extend_existing": True}
 
     id            = Column(Integer, primary_key=True, index=True)
+    user_id       = Column(String, nullable=True, index=True)
     goal          = Column(String)
     request       = Column(Text)
     status        = Column(String, default="success")
@@ -72,11 +74,27 @@ class WorkflowRun(Base):
     created_at    = Column(DateTime, default=datetime.utcnow)
 
 
+class QuizAttempt(Base):
+    """One user's answer to one quiz question (Day 13)."""
+    __tablename__ = "quiz_attempts"
+    __table_args__ = {"extend_existing": True}
+
+    id            = Column(Integer, primary_key=True, index=True)
+    user_id       = Column(String, nullable=False, index=True)
+    run_id        = Column(Integer, nullable=True, index=True)   # workflow run that generated the quiz
+    question_idx  = Column(Integer, nullable=False)              # 0-based index within quiz
+    question_text = Column(Text, nullable=False)
+    chosen_answer = Column(String(1), nullable=False)            # A/B/C/D
+    correct_answer= Column(String(1), nullable=False)
+    is_correct    = Column(Integer, nullable=False)              # 0/1 (SQLite-safe bool)
+    created_at    = Column(DateTime, default=datetime.utcnow)
+
+
 def _sync_columns():
     """Add any model columns missing from already-existing tables."""
     inspector = inspect(engine)
     existing_tables = inspector.get_table_names()
-    models = [WorkflowRun, Document, DocumentChunk]
+    models = [WorkflowRun, Document, DocumentChunk, QuizAttempt]
     with engine.begin() as conn:
         for model in models:
             tname = model.__tablename__
@@ -89,18 +107,37 @@ def _sync_columns():
                     conn.execute(text(f'ALTER TABLE {tname} ADD COLUMN "{column.name}" {col_type}'))
 
 
+MAX_DOCS_PER_USER = 10
+
+
 def get_or_create_document(db, *, filename: str, content_type: str,
                             size_bytes: int, page_count: int,
-                            char_count: int, content_hash: str) -> tuple:
+                            char_count: int, content_hash: str,
+                            user_id: str = None) -> tuple:
     """Return (document, created: bool).
 
-    If a document with the same content_hash already exists, return it
-    without re-chunking.  Otherwise insert a new Document row.
+    Dedup by (user_id, content_hash) so the same file can be uploaded by
+    different users without conflicting.  Enforces MAX_DOCS_PER_USER quota.
     """
-    existing = db.query(Document).filter_by(content_hash=content_hash).first()
+    q = db.query(Document).filter_by(content_hash=content_hash)
+    if user_id:
+        q = q.filter_by(user_id=user_id)
+    existing = q.first()
     if existing:
         return existing, False
+
+    # Quota check
+    if user_id:
+        count = db.query(Document).filter_by(user_id=user_id).count()
+        if count >= MAX_DOCS_PER_USER:
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=429,
+                detail=f"Document quota reached ({MAX_DOCS_PER_USER} documents per user). Delete a document to upload more.",
+            )
+
     doc = Document(
+        user_id=user_id,
         filename=filename,
         content_type=content_type,
         size_bytes=size_bytes,
@@ -110,7 +147,7 @@ def get_or_create_document(db, *, filename: str, content_type: str,
         status="ready",
     )
     db.add(doc)
-    db.flush()  # populate doc.id without committing
+    db.flush()
     return doc, True
 
 

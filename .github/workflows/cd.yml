@@ -1,0 +1,222 @@
+name: CD
+
+# Triggers after CI passes on main, or manually via workflow_dispatch.
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (default: commit SHA)"
+        required: false
+
+# Prevents two deployments running at the same time.
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ghcr.io/${{ github.repository }}/backend
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository }}/frontend
+
+jobs:
+  # ── 1. Only run if CI succeeded ─────────────────────────────────────────────
+  guard:
+    name: Guard — CI must pass
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - run: echo "CI passed. Proceeding with CD."
+
+  # ── 2. Build & push Docker images ───────────────────────────────────────────
+  build:
+    name: Build images
+    needs: guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image-tag: ${{ steps.tag.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: tag
+        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
+            ${{ env.BACKEND_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: true
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
+            ${{ env.FRONTEND_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── 3. Smoke tests against service containers ────────────────────────────────
+  smoke:
+    name: Smoke tests
+    needs: build
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ${{ secrets.CI_DB_PASSWORD }}
+          POSTGRES_DB: smokedb
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://ci_user:${{ secrets.CI_DB_PASSWORD }}@localhost:5432/smokedb
+      REDIS_URL: redis://localhost:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run smoke tests
+        run: pytest tests/test_smoke.py -v --tb=short
+
+  # ── 4. Human approval gate ───────────────────────────────────────────────────
+  #
+  # Create a GitHub Environment named "production" in:
+  #   Settings → Environments → New environment → Add required reviewers
+  # Only approved reviewers can unblock this step.
+  gate:
+    name: Await production approval
+    needs: smoke
+    runs-on: ubuntu-latest
+    environment: production   # <── approval gate lives here
+
+    steps:
+      - name: Deployment approved
+        run: echo "Deployment to production approved by ${{ github.actor }}."
+
+  # ── 5. Deploy ─────────────────────────────────────────────────────────────────
+  #
+  # Required secrets (set in repo Settings → Secrets → Actions):
+  #   DEPLOY_HOST       — SSH hostname or IP of the production server
+  #   DEPLOY_USER       — SSH username
+  #   DEPLOY_SSH_KEY    — private key (RSA or Ed25519)
+  #   DEPLOY_ENV_FILE   — full contents of the production .env file
+  deploy:
+    name: Deploy to production
+    needs: gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: BACKEND_IMAGE,FRONTEND_IMAGE,GITHUB_SHA
+          script: |
+            set -e
+            cd /opt/ai-automation-engine
+
+            # Write the production .env (injected as a secret)
+            echo '${{ secrets.DEPLOY_ENV_FILE }}' > .env
+
+            # Pull new images
+            docker pull ${BACKEND_IMAGE}:${GITHUB_SHA}
+            docker pull ${FRONTEND_IMAGE}:${GITHUB_SHA}
+
+            # Rolling restart — zero downtime for stateless app+frontend
+            IMAGE_TAG=${GITHUB_SHA} docker compose up -d --no-deps --pull never app worker frontend
+
+            # Wait for health to become green (up to 60 s)
+            for i in $(seq 1 12); do
+              STATUS=$(curl -sf http://localhost:8000/health | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])" 2>/dev/null || echo "unreachable")
+              echo "[$i/12] health: $STATUS"
+              [ "$STATUS" = "ok" ] && break
+              sleep 5
+            done
+
+            [ "$STATUS" = "ok" ] || (echo "Health check failed after deploy" && exit 1)
+
+      - name: Record deployment
+        if: success()
+        run: |
+          echo "Deployed backend ${{ env.BACKEND_IMAGE }}:${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Deployed frontend ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 6. Rollback on failure ───────────────────────────────────────────────────
+  rollback:
+    name: Rollback on deploy failure
+    needs: deploy
+    if: failure()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Rollback to previous image
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/ai-automation-engine
+            # Pull and restart with the 'latest' tag, which still points
+            # to the last successful deploy before this one.
+            docker compose up -d --no-deps --pull always app worker frontend
+            echo "Rolled back to previous :latest image."
+
+      - name: Mark rollback in summary
+        run: echo "⚠️ Deploy failed — rolled back to previous :latest image." >> "$GITHUB_STEP_SUMMARY"

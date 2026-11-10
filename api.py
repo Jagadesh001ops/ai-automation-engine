@@ -2,8 +2,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import json
-from fastapi import FastAPI, Depends, HTTPException
+import os
+import contextlib
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from engine.intent_parser import parse_intent
 from engine.execution_engine import ExecutionEngine
@@ -13,6 +17,20 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="AI Workflow Engine", version="1.0.0")
 
+# ─── Maintenance mode ─────────────────────────────────────────────────────────
+# Set MAINTENANCE_MODE=1 in environment to block all traffic with a 503.
+# /health and /metrics are always exempt so load balancers stay informed.
+_MAINTENANCE = os.getenv("MAINTENANCE_MODE", "").lower() in ("1", "true", "yes")
+
+@app.middleware("http")
+async def maintenance_gate(request: Request, call_next):
+    if _MAINTENANCE and request.url.path not in ("/health", "/metrics"):
+        return JSONResponse(
+            {"status": "maintenance", "message": "Service temporarily unavailable. Check back soon."},
+            status_code=503,
+        )
+    return await call_next(request)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173",
@@ -21,6 +39,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── Prometheus metrics ───────────────────────────────────────────────────────
+from prometheus_fastapi_instrumentator import Instrumentator
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 # Create tables on startup
 init_db()
@@ -60,7 +82,27 @@ class RunResponse(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    """Deep health check: verifies DB and Redis are reachable."""
+    db_ok = False
+    redis_ok = False
+
+    with contextlib.suppress(Exception):
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        db_ok = True
+
+    with contextlib.suppress(Exception):
+        import redis as _redis
+        r = _redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"), socket_connect_timeout=2)
+        r.ping()
+        redis_ok = True
+
+    overall = "ok" if (db_ok and redis_ok) else "degraded"
+    return JSONResponse(
+        {"status": overall, "db": "ok" if db_ok else "error", "redis": "ok" if redis_ok else "error"},
+        status_code=200 if overall == "ok" else 503,
+    )
 
 
 @app.get("/runs")

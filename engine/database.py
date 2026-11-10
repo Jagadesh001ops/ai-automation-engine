@@ -183,8 +183,11 @@ def init_db():
     retries = 5
     for attempt in range(retries):
         try:
-            with engine.begin() as conn:
-                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            except Exception:
+                pass  # pgvector not installed on this Postgres — fall back to text embedding column
             Base.metadata.create_all(bind=engine)
             _sync_columns()
             print("OK - Database connected and tables created")

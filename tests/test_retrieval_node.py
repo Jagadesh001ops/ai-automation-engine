@@ -24,24 +24,25 @@ def test_retrieve_chunks_returns_list(monkeypatch):
         (fake_chunk, 0.12)
     ]
 
+    # Mock the embedding column attribute so cosine_distance() doesn't hit real SQLAlchemy
+    mock_embedding = MagicMock()
+    mock_embedding.cosine_distance.return_value.label.return_value = MagicMock()
+    mock_embedding.isnot.return_value = MagicMock()
+
+    import engine.retrieval_node as rn
+    orig_pgvec = rn._HAS_PGVECTOR
+
     with (
         patch("engine.retrieval_node.SessionLocal", return_value=db),
         patch("engine.retrieval_node.embed", return_value=[0.0] * 384),
-        patch("engine.retrieval_node._HAS_PGVECTOR", True, create=True),
+        patch("engine.database.DocumentChunk.embedding", mock_embedding, create=True),
     ):
-        # Patch the module-level attribute directly
-        import engine.retrieval_node as rn
-        orig = getattr(rn, "_HAS_PGVECTOR", None)
-        rn._HAS_PGVECTOR = True  # type: ignore
+        rn._HAS_PGVECTOR = True
         try:
             results = retrieve_chunks("what is psychology?", document_id=10, top_k=5)
         finally:
-            if orig is None:
-                del rn._HAS_PGVECTOR  # type: ignore
-            else:
-                rn._HAS_PGVECTOR = orig  # type: ignore
+            rn._HAS_PGVECTOR = orig_pgvec
 
-    # Even if the DB mock doesn't line up exactly, the function should return a list
     assert isinstance(results, list)
 
 

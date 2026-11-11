@@ -19,6 +19,8 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
+  # Placeholders — overridden with lowercase values in each job that uses them.
+  # (github.repository preserves the owner's casing; Docker requires lowercase.)
   BACKEND_IMAGE: ghcr.io/${{ github.repository }}/backend
   FRONTEND_IMAGE: ghcr.io/${{ github.repository }}/frontend
 
@@ -47,6 +49,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set lowercase image names
+        run: |
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "BACKEND_IMAGE=ghcr.io/${REPO_LC}/backend" >> "$GITHUB_ENV"
+          echo "FRONTEND_IMAGE=ghcr.io/${REPO_LC}/frontend" >> "$GITHUB_ENV"
 
       - name: Compute image tag
         id: tag
@@ -91,11 +99,11 @@ jobs:
 
     services:
       postgres:
-        image: postgres:15
+        image: pgvector/pgvector:pg15
         env:
           POSTGRES_USER: ci_user
-          POSTGRES_PASSWORD: ${{ secrets.CI_DB_PASSWORD }}
           POSTGRES_DB: smokedb
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports: ["5432:5432"]
         options: >-
           --health-cmd pg_isready
@@ -112,8 +120,12 @@ jobs:
           --health-retries 5
 
     env:
-      DATABASE_URL: postgresql://ci_user:${{ secrets.CI_DB_PASSWORD }}@localhost:5432/smokedb
-      REDIS_URL: redis://localhost:6379
+      DATABASE_URL: postgresql://ci_user@127.0.0.1:5432/smokedb
+      REDIS_URL: redis://127.0.0.1:6379
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: ci_user
+      PGDATABASE: smokedb
 
     steps:
       - uses: actions/checkout@v4
@@ -158,6 +170,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set lowercase image names
+        run: |
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "BACKEND_IMAGE=ghcr.io/${REPO_LC}/backend" >> "$GITHUB_ENV"
+          echo "FRONTEND_IMAGE=ghcr.io/${REPO_LC}/frontend" >> "$GITHUB_ENV"
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0

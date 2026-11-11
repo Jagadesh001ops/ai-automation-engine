@@ -90,7 +90,7 @@ def _make_plan():
     )
     return WorkflowPlan(
         goal="Summarise the document",
-        scope="document",
+        scope="single_document",
         steps=[step],
         estimated_steps=1,
         too_broad=False,

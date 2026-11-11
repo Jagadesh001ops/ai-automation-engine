@@ -1,0 +1,35 @@
+# Ruff configuration for Adaptive Document Learning Engine
+line-length = 120
+target-version = "py312"
+
+[lint]
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "RUF",    # ruff-specific
+    "C4",     # flake8-comprehensions
+]
+ignore = [
+    "B008",   # FastAPI Depends() in default args — intentional pattern
+    "BLE001", # blind except — intentional in LLM/DB error handling
+    "S110",   # try-except-pass — intentional fallbacks
+    "SIM117", # nested with — readability preference
+    "RUF012", # mutable class defaults — SQLAlchemy model pattern
+    "TRY201", # verbose raise — explicit is clearer
+    "PLW0602",# global var not assigned — module-level singletons
+    "UP006",  # non-pep585 annotation in function signatures — keep for clarity
+    "UP007",  # Optional[X] → X | None (ruff <=0.16 name; renamed UP045 in 0.17+)
+    "UP035",  # deprecated typing imports — gradual migration
+    "UP045",  # Optional[X] → X | None (ruff 0.17+ name)
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["F401", "F811", "E501"]  # test files: long mock chains, fixture imports
+"api.py" = ["E402", "E501"]            # load_dotenv() first; SSE f-strings can't split cleanly
+"engine/llm_nodes.py" = ["E402"]      # load_dotenv() must run before client init
+"engine/intent_parser.py" = ["E402"] # load_dotenv() must run before client init
+"tests/conftest.py" = ["E402"]        # same — env must be set before module imports

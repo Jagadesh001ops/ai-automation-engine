@@ -7,10 +7,35 @@ should use this fixture (or a fixture that depends on it).
 """
 from __future__ import annotations
 
+import os
+import pathlib
+import sys
+
+# Ensure the worktree's engine package takes priority over the main repo's.
+_worktree_root = str(pathlib.Path(__file__).parent.parent)
+if _worktree_root not in sys.path:
+    sys.path.insert(0, _worktree_root)
+
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def ensure_db_schema():
+    """Create all tables once per session when DATABASE_URL is available.
+
+    This runs before any test so smoke tests (which use a module-level
+    TestClient that never enters the lifespan context) still have tables.
+    Skips silently when DATABASE_URL is not set.
+    """
+    if not os.getenv("DATABASE_URL"):
+        return
+    # Use init_db() not create_all() — init_db() runs CREATE EXTENSION vector
+    # first, which is required before any table with a Vector column can be created.
+    from engine.database import init_db
+    init_db()
 
 
 def _make_groq_response(content: str, input_tokens: int = 10, output_tokens: int = 20):

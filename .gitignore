@@ -3,7 +3,11 @@ venv/
 __pycache__/
 *.pyc
 *.log
+*.docx
+*.txt
 .agents/
 .claude/
 .pytest_cache/
 .vscode/
+reports/
+research_notes/

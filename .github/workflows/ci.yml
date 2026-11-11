@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, "claude/**"]
+    branches: [main, forge, "claude/**"]
   pull_request:
-    branches: [main]
+    branches: [main, forge]
 
 jobs:
   lint:
@@ -21,7 +21,7 @@ jobs:
           cache: pip
 
       - name: Install ruff
-        run: pip install ruff==0.11.13
+        run: pip install ruff==0.17.4
 
       - name: Ruff — check Python
         run: ruff check engine/ api.py tests/
@@ -48,11 +48,11 @@ jobs:
 
     services:
       postgres:
-        image: postgres:15
+        image: pgvector/pgvector:pg15
         env:
           POSTGRES_USER: ci_user
-          POSTGRES_PASSWORD: ${{ secrets.CI_DB_PASSWORD }}
           POSTGRES_DB: testdb
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports: ["5432:5432"]
         options: >-
           --health-cmd pg_isready
@@ -70,8 +70,18 @@ jobs:
           --health-retries 5
 
     env:
-      DATABASE_URL: postgresql://ci_user:${{ secrets.CI_DB_PASSWORD }}@localhost:5432/testdb
-      REDIS_URL: redis://localhost:6379
+      # Postgres uses trust auth (no password) so no secret is needed.
+      # Use 127.0.0.1 — Ubuntu resolves localhost→::1 (IPv6) while service
+      # containers listen on 127.0.0.1 (IPv4).
+      DATABASE_URL: postgresql://ci_user@127.0.0.1:5432/testdb
+      REDIS_URL: redis://127.0.0.1:6379
+      # Explicit libpq env vars so psycopg2 uses TCP + ci_user even if the
+      # DATABASE_URL parsing is imperfect (GitHub runners run as root, so
+      # libpq's OS-user fallback would try role "root" and fail).
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: ci_user
+      PGDATABASE: testdb
       # No SUPABASE_JWT_SECRET → auth runs in dev-bypass mode
       # No GROQ_API_KEY → LLM calls are mocked in tests
 
@@ -82,10 +92,26 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
+          cache: pip  # caches pip download cache keyed on requirements.txt hash
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt pytest-cov python-multipart
+      - name: Install dependencies (CI — skip heavy ML packages)
+        run: |
+          # sentence-transformers pulls in torch (~2 GB) — engine.embeddings.embed_batch
+          # is mocked in every test, so the model is never loaded in CI.
+          # Strip it here; prod Docker image installs the full requirements.txt.
+          grep -v "sentence-transformers" requirements.txt > /tmp/requirements-ci.txt
+          pip install -r /tmp/requirements-ci.txt
+
+      - name: Wait for PostgreSQL TCP port
+        run: |
+          # pg_isready inside the service container can pass before the port is
+          # forwarded to the host. Probe 127.0.0.1:5432 from the runner directly.
+          for i in $(seq 1 30); do
+            pg_isready -h 127.0.0.1 -p 5432 -U ci_user && exit 0
+            echo "Waiting for PostgreSQL... attempt $i/30"
+            sleep 2
+          done
+          echo "PostgreSQL did not become ready in time" && exit 1
 
       - name: Run tests with branch coverage
         run: |

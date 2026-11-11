@@ -51,8 +51,8 @@ jobs:
         image: postgres:15
         env:
           POSTGRES_USER: ci_user
-          POSTGRES_PASSWORD: ${{ secrets.CI_DB_PASSWORD }}
           POSTGRES_DB: testdb
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports: ["5432:5432"]
         options: >-
           --health-cmd pg_isready
@@ -70,14 +70,18 @@ jobs:
           --health-retries 5
 
     env:
-      # Use 127.0.0.1 not localhost — Ubuntu 26+ resolves localhost→::1 (IPv6)
-      # while service containers listen on 127.0.0.1 (IPv4), causing "socket refused".
-      DATABASE_URL: postgresql://ci_user:${{ secrets.CI_DB_PASSWORD }}@127.0.0.1:5432/testdb
+      # Postgres uses trust auth (no password) so no secret is needed.
+      # Use 127.0.0.1 — Ubuntu resolves localhost→::1 (IPv6) while service
+      # containers listen on 127.0.0.1 (IPv4).
+      DATABASE_URL: postgresql://ci_user@127.0.0.1:5432/testdb
       REDIS_URL: redis://127.0.0.1:6379
-      # Force psycopg2/libpq to use TCP — overrides any system PGHOST that may
-      # point to a Unix socket (common on Ubuntu runners with a local Postgres install).
+      # Explicit libpq env vars so psycopg2 uses TCP + ci_user even if the
+      # DATABASE_URL parsing is imperfect (GitHub runners run as root, so
+      # libpq's OS-user fallback would try role "root" and fail).
       PGHOST: 127.0.0.1
       PGPORT: "5432"
+      PGUSER: ci_user
+      PGDATABASE: testdb
       # No SUPABASE_JWT_SECRET → auth runs in dev-bypass mode
       # No GROQ_API_KEY → LLM calls are mocked in tests
 

@@ -32,9 +32,10 @@ def ensure_db_schema():
     """
     if not os.getenv("DATABASE_URL"):
         return
-    from engine.database import Base
-    from engine.database import engine as _db_engine
-    Base.metadata.create_all(_db_engine)
+    # Use init_db() not create_all() — init_db() runs CREATE EXTENSION vector
+    # first, which is required before any table with a Vector column can be created.
+    from engine.database import init_db
+    init_db()
 
 
 def _make_groq_response(content: str, input_tokens: int = 10, output_tokens: int = 20):

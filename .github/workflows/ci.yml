@@ -74,6 +74,10 @@ jobs:
       # while service containers listen on 127.0.0.1 (IPv4), causing "socket refused".
       DATABASE_URL: postgresql://ci_user:${{ secrets.CI_DB_PASSWORD }}@127.0.0.1:5432/testdb
       REDIS_URL: redis://127.0.0.1:6379
+      # Force psycopg2/libpq to use TCP — overrides any system PGHOST that may
+      # point to a Unix socket (common on Ubuntu runners with a local Postgres install).
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
       # No SUPABASE_JWT_SECRET → auth runs in dev-bypass mode
       # No GROQ_API_KEY → LLM calls are mocked in tests
 
@@ -93,6 +97,17 @@ jobs:
           # Strip it here; prod Docker image installs the full requirements.txt.
           grep -v "sentence-transformers" requirements.txt > /tmp/requirements-ci.txt
           pip install -r /tmp/requirements-ci.txt
+
+      - name: Wait for PostgreSQL TCP port
+        run: |
+          # pg_isready inside the service container can pass before the port is
+          # forwarded to the host. Probe 127.0.0.1:5432 from the runner directly.
+          for i in $(seq 1 30); do
+            pg_isready -h 127.0.0.1 -p 5432 -U ci_user && exit 0
+            echo "Waiting for PostgreSQL... attempt $i/30"
+            sleep 2
+          done
+          echo "PostgreSQL did not become ready in time" && exit 1
 
       - name: Run tests with branch coverage
         run: |

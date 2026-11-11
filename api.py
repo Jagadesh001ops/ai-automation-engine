@@ -34,7 +34,15 @@ from engine.ingestion import ExtractionError, IngestionError, ingest
 from engine.intent_parser import parse_intent
 from engine.llm_nodes import build_node_for_step
 
-app = FastAPI(title="AI Workflow Engine", version="1.0.0")
+
+@contextlib.asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Runs once when the server starts (not on import) — safe to connect to DB here.
+    init_db()
+    yield
+
+
+app = FastAPI(title="AI Workflow Engine", version="1.0.0", lifespan=lifespan)
 
 # ─── Maintenance mode ─────────────────────────────────────────────────────────
 # Set MAINTENANCE_MODE=1 to block all traffic with 503 (health/metrics exempt).
@@ -61,8 +69,6 @@ app.add_middleware(
 from prometheus_fastapi_instrumentator import Instrumentator
 
 Instrumentator().instrument(app).expose(app, endpoint="/metrics")
-
-init_db()
 
 
 # ─── DB dependency ────────────────────────────────────────────────────────────

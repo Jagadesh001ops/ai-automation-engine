@@ -7,6 +7,7 @@ should use this fixture (or a fixture that depends on it).
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 
@@ -19,6 +20,21 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def ensure_db_schema():
+    """Create all tables once per session when DATABASE_URL is available.
+
+    This runs before any test so smoke tests (which use a module-level
+    TestClient that never enters the lifespan context) still have tables.
+    Skips silently when DATABASE_URL is not set.
+    """
+    if not os.getenv("DATABASE_URL"):
+        return
+    from engine.database import Base
+    from engine.database import engine as _db_engine
+    Base.metadata.create_all(_db_engine)
 
 
 def _make_groq_response(content: str, input_tokens: int = 10, output_tokens: int = 20):

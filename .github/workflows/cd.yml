@@ -135,8 +135,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt pytest
+      - name: Install dependencies (skip heavy ML packages)
+        run: |
+          grep -v "sentence-transformers" requirements.txt > /tmp/requirements-ci.txt
+          pip install -r /tmp/requirements-ci.txt
 
       - name: Run smoke tests
         run: pytest tests/test_smoke.py -v --tb=short

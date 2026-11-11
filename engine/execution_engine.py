@@ -1,11 +1,12 @@
-from typing import Any, Dict, List
-from .schemas import WorkflowPlan
+from typing import Any, Callable, Dict, List, Optional
+
 from .nodes import BaseNode, NodeResult
+from .schemas import WorkflowPlan
 
 
 class StepTrace:
     def __init__(self, name: str, success: bool, execution_time_ms: float,
-                 input_tokens: int, output_tokens: int, error: str = None):
+                 input_tokens: int, output_tokens: int, error: str | None = None):
         self.name = name
         self.success = success
         self.execution_time_ms = execution_time_ms or 0
@@ -25,21 +26,40 @@ class ExecutionEngine:
     def register_node(self, step_name: str, node: BaseNode):
         self.registry[step_name] = node
 
-    def run(self, plan: WorkflowPlan,
-            initial_state: Dict[str, Any]) -> tuple[Dict[str, Any], List[StepTrace]]:
+    def run(
+        self,
+        plan: WorkflowPlan,
+        initial_state: Dict[str, Any], *,
+        on_step_start: Optional[Callable[[str], None]] = None,
+        on_step_end: Optional[Callable[[str, "StepTrace"], None]] = None,
+    ) -> tuple[Dict[str, Any], List[StepTrace]]:
+        """Execute *plan* against *initial_state*.
+
+        Optional keyword-only callbacks for streaming (used by api.py SSE):
+            on_step_start(step_name)
+            on_step_end(step_name, trace)
+        When callbacks are absent, progress is printed to stdout instead.
+        """
         state = initial_state.copy()
         traces: List[StepTrace] = []
+        use_callbacks = on_step_start is not None or on_step_end is not None
 
-        print(f"\nExecuting: {plan.goal}")
-        print(f"Steps: {plan.estimated_steps}\n")
+        if not use_callbacks:
+            print(f"\nExecuting: {plan.goal}")
+            print(f"Steps: {plan.estimated_steps}\n")
 
         for step in plan.steps:
-            print(f"Running: {step.name}...")
-            node = self.registry.get(step.name)
+            if not use_callbacks:
+                print(f"Running: {step.name}...")
 
+            node = self.registry.get(step.name)
             if node is None:
-                print(f"  ✗ No node registered for '{step.name}' — skipping")
+                if not use_callbacks:
+                    print(f"  SKIP No node registered for '{step.name}'")
                 continue
+
+            if on_step_start:
+                on_step_start(step.name)
 
             result: NodeResult = node.execute(state)
 
@@ -49,25 +69,29 @@ class ExecutionEngine:
                 execution_time_ms=result.execution_time_ms,
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
-                error=result.error
+                error=result.error,
             )
             traces.append(trace)
 
+            if on_step_end:
+                on_step_end(step.name, trace)
+
             if result.success:
                 state[result.output_key] = result.output_value
-                print(f"  ✓ {step.name} → {result.execution_time_ms}ms | "
-                      f"tokens in={result.input_tokens} out={result.output_tokens}")
+                if not use_callbacks:
+                    print(f"  OK {step.name} -> {result.execution_time_ms}ms | "
+                          f"tokens in={result.input_tokens} out={result.output_tokens}")
             else:
-                print(f"  ✗ {step.name} failed: {result.error}")
+                if not use_callbacks:
+                    print(f"  FAIL {step.name}: {result.error}")
                 break
 
-        # Print summary
-        total_time = sum(t.execution_time_ms for t in traces)
-        total_in = sum(t.input_tokens for t in traces)
-        total_out = sum(t.output_tokens for t in traces)
-        print(f"\n── Trace Summary ──────────────────────────")
-        for t in traces:
-            print(repr(t))
-        print(f"  Total: {total_time}ms | {total_in + total_out} tokens")
+        if not use_callbacks:
+            total_time = sum(t.execution_time_ms for t in traces)
+            total_tok = sum(t.input_tokens + t.output_tokens for t in traces)
+            print("\n-- Trace Summary --")
+            for t in traces:
+                print(repr(t))
+            print(f"  Total: {total_time}ms | {total_tok} tokens")
 
         return state, traces

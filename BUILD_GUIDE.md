@@ -56,7 +56,7 @@
 **Files touched:** new `engine/ingestion.py`, `api.py` (new `/documents` upload route).
 **Definition of done:** uploading a normal OpenStax chapter PDF and a deliberately scanned/image-only page both produce usable extracted text; an oversized or corrupt file produces a clear error, not a crash.
 **Reflection:**
->
+> `engine/ingestion.py` is the single entry point: one `ingest(data, filename, content_type)` function that validates type and size first, then delegates to `_extract_pdf` or `_extract_text_file`. Pdfplumber handles text-layer PDFs; any page whose extracted text falls under 100 characters is attempted with Tesseract OCR — and if Tesseract isn't installed (common on Windows), the page goes into `ocr_skipped_pages` rather than crashing. Two exception types keep the mapping clean: `IngestionError` (4xx — bad type, oversized, empty) vs `ExtractionError` (422 — valid file, unreadable). The `/documents` POST endpoint maps these to HTTP 415/413/422 respectively. The tricky path-priority bug: when pytest ran from the main repo root, Python found the main `engine/` package first on `sys.path`, which lacked `ingestion.py` — fixed by inserting the worktree root at `sys.path[0]` in `tests/conftest.py`. All 17 tests pass. Key interview point: separating validation errors (IngestionError) from extraction errors (ExtractionError) makes the API contract explicit — clients know whether to show "wrong file type" vs. "file unreadable" without parsing error strings.
 
 ### Day 4 — Chunking + embeddings + pgvector storage
 **Goal:** turn extracted text into retrievable, embedded chunks.
@@ -69,7 +69,7 @@
 **Files touched:** `engine/chunking.py`, `engine/database.py` (new `DocumentChunk` model + pgvector column), `engine/embeddings.py`.
 **Definition of done:** ingesting one OpenStax chapter produces a sane number of chunks in Postgres, each with a non-null embedding and a traceable source reference; re-uploading the same file doesn't duplicate them.
 **Reflection:**
->
+> `engine/chunking.py` uses a char-based sliding window (~2400 chars = 600 tokens * 4 chars/token) over sentence boundaries, sliding forward by (window - overlap) each step. One tricky bug: when text is shorter than the overlap, `advance` would compute as `max(1, negative)` = 1, causing the loop to crawl through the text character by character producing hundreds of near-identical chunks. Fixed with a single `if end >= len(text): break` guard. Deduplication lives in two places: `Document` dedupes by SHA-256 of the raw bytes (same file uploaded twice returns the existing row immediately, no re-embedding); `DocumentChunk` dedupes by SHA-256 of chunk text (protects against partial re-ingestion of overlapping documents). The pgvector column uses a conditional import so the server still starts cleanly even if the pgvector Python package isn't installed — it falls back to `Text` (stored as JSON string), which is ugly but not crashy. `init_db()` now runs `CREATE EXTENSION IF NOT EXISTS vector` before `create_all` so the vector column type is available. 26 tests pass. Key interview point: char-based chunking with a fixed chars-per-token ratio is fast and dependency-free; token-exact splitting (via tiktoken) adds precision but also a hard dependency and measurably slower throughput — worth profiling before switching.
 
 ### Day 5 — Background ingestion pipeline end-to-end
 **Goal:** wire upload → extract → chunk → embed → store as a single ARQ background job with visible status.
@@ -82,7 +82,7 @@
 **Files touched:** new `engine/jobs.py` (ARQ worker), `api.py`, `engine/database.py`.
 **Definition of done:** upload a document, poll its status, watch it move `processing → ready`; deliberately break extraction (corrupt file) and confirm it lands on `failed` with a real error message, not stuck on `processing`.
 **Reflection:**
->
+> `POST /documents` now returns 202 immediately: it validates + extracts synchronously (so the caller gets a real 415/413/422 for bad files rather than finding out later), creates the `Document` row with `status="processing"`, enqueues `ingest_document` via ARQ, and returns `{document_id, status: "processing"}`. The heavy work (chunk → embed → store) runs in the worker container. Two new endpoints handle polling: `GET /documents` lists all documents, `GET /documents/{id}` returns the current status. The job updates the row to `status="ready"` on success or `status="failed"` (with `error_message`) on any error — so a stuck `processing` row is impossible without a dead worker process. The sync fallback (when Redis is unavailable) makes local development without Docker work without any code changes. Key patch location: since `ingest_document` uses local imports, tests patch at the source modules (`engine.database.SessionLocal`, `engine.embeddings.embed_batch`) not at `engine.jobs.*`. 33 tests pass.
 
 ---
 
@@ -99,7 +99,7 @@
 **Files touched:** `engine/llm_nodes.py`, `engine/registry.py` (new).
 **Definition of done:** the existing test suite (Day 2) still passes, and the routing decision for a given step name is traceable/inspectable, not implicit.
 **Reflection:**
->
+> `engine/registry.py` introduces `NodeEntry` (dataclass: name, description, node_class, aliases, prefixes) and `NodeRegistry` (resolve by exact name → alias → prefix, describe() for planner injection). `llm_nodes.py` calls `_set_registry(_build_registry())` at module load time — so any import of `llm_nodes` installs the registry as a side effect. `get_registry()` lazy-imports `llm_nodes` if no registry is set yet, avoiding circular imports. The old routing bug is now structurally impossible: `resolve()` returns `None` for unknowns and `build_node_for_step` falls back to `LLMNode` — there's no substring scan that can misfire. All 58 tests pass including the original routing tests. Key interview point: registering node metadata (not just classes) means the same data structure drives both routing and prompt injection — no duplication, no drift.
 
 ### Day 7 — Retrieval-aware Intent Parser
 **Goal:** the planner needs to know retrieval is a step type, and what scope (one document, several, or full library) a request applies to.
@@ -112,7 +112,7 @@
 **Files touched:** `engine/intent_parser.py`, `engine/schemas.py` (extend `WorkflowPlan`/`WorkflowStep` if needed).
 **Definition of done:** three test requests — single doc, multi-doc, whole library — produce three distinguishable, sensible plans.
 **Reflection:**
->
+> `parse_intent()` now accepts an optional `available_nodes` list (falls back to `get_registry().describe()`), so the system prompt always lists exactly the node types the engine can actually execute — the planner can't invent steps that don't exist. The system prompt encodes three scope values (`single_document`, `multi_document`, `library`) with explicit rules, and a `too_broad` escape hatch with a `too_broad_reason` the UI can surface. `WorkflowPlan` in `schemas.py` gains `scope`, `too_broad`, and `too_broad_reason` fields; back-compat defaults (`setdefault`) handle responses from older LLM calls that don't include them. Key interview point: injecting the node list into every planning call means the planner is self-consistent — if you add a `flashcard` node to the registry, it becomes available for planning immediately with no prompt-engineering work.
 
 ### Day 8 — Retrieval node
 **Goal:** given a plan step needing source content, pull the top-N relevant chunks from pgvector instead of the whole document.
@@ -124,7 +124,7 @@
 **Files touched:** `engine/retrieval_node.py` (new), `engine/execution_engine.py` (state now carries retrieved chunks, not raw text).
 **Definition of done:** a query against the ingested Psychology 2e chapter returns chunks that are actually relevant to the query, verified by eye against 5–10 manual test queries.
 **Reflection:**
->
+> `engine/retrieval_node.py` — `retrieve_chunks(query, document_id, top_k)` embeds the query with the same `all-MiniLM-L6-v2` model used at ingest time, then runs `DocumentChunk.embedding.cosine_distance(query_vec)` via SQLAlchemy + pgvector. When pgvector isn't importable (local dev without the extension), falls back to returning the most recent chunks in order — ugly but not crashy. `RetrieveChunksNode` wraps this as a first-class step type registered in the registry, writing `retrieved_chunks` to state so downstream generation nodes consume chunks instead of raw document text. The execution engine already passes the full state dict to every node, so no engine changes were needed — retrieval output arrives in state as a list of `{chunk_id, document_id, text, char_start, char_end, score}` dicts that cite their own location. Key interview point: using the same embedding model for ingest and retrieval is non-negotiable — a mismatch in normalisation or model version makes cosine similarity meaningless across the two vectors.
 
 ### Day 9 — Generation with citations
 **Goal:** every generated summary/flashcard/quiz item carries a citation back to the chunk/document/section it came from.
@@ -136,7 +136,7 @@
 **Files touched:** `engine/llm_nodes.py` (extend specialist nodes), `engine/schemas.py`.
 **Definition of done:** a generated quiz question has a citation field pointing at a real chunk ID/section, and spot-checking that chunk against the question confirms it's actually the source.
 **Reflection:**
->
+> `GenerateQuizNode._build_messages()` now looks for `retrieved_chunks` in state first; if present it builds the source text as `[chunk_id=N]\n<text>` blocks so the LLM can cite chunk IDs directly. The system prompt instructs the model to return a JSON array with a `citation: {chunk_id, excerpt}` field per item. After generation, `_execute()` enriches each citation with `document_id`, `char_start`, and `char_end` pulled from the chunk map — so the citation carries a full source pointer without a second DB round-trip. `schemas.py` adds `Citation`, `QuizItem`, and `QuizOutput` Pydantic models; these aren't enforced on the LLM output yet (raw JSON is returned as-is) but provide the canonical shape for the frontend and verification pass to depend on. Key interview point: the citation is structured data (`{chunk_id, char_start, char_end}`) not prose — that's what makes it linkable from the frontend and verifiable by the Day 10 judge, rather than being decorative.
 
 ### Day 10 — Verification (LLM-as-judge)
 **Goal:** every quiz item and its marked-correct answer gets checked by a second pass before being returned.
@@ -148,7 +148,7 @@
 **Files touched:** `engine/verification_node.py` (new).
 **Definition of done:** deliberately inject a wrong "correct" answer into a test case and confirm the verification step catches it and flags/regenerates rather than passing it through.
 **Reflection:**
->
+> `engine/verification_node.py` — `verify_quiz_items()` runs two LLM calls per failing item: one to verify (`correct: bool, reason: str`), one to regenerate the answer, then a second verify. If the regenerated answer still fails, the item is kept but `verification_note` is prefixed with `[FLAGGED]` — the item is never silently dropped or shown as correct. `VerifyQuizNode` wraps this, accepting `quiz_items` as either a list or a JSON string (since `GenerateQuizNode` may return raw JSON). The verification prompt is strict: "if the source text does not clearly support the marked answer, return correct=false" — erring toward false positives forces regeneration, which is the safer failure mode for study material. 58 tests pass. Key interview point: the three-state outcome (verified=True / verified=False / verified=None) is deliberate — `None` means verification was skipped (no source chunks), which is different from `False` (verified wrong). The UI and downstream eval harness can distinguish all three.
 
 ---
 

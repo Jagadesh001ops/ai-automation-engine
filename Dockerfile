@@ -2,8 +2,16 @@
 FROM python:3.12-slim AS builder
 
 WORKDIR /app
+
+# Layer A — heavy ML packages (torch + sentence-transformers, ~2 GB).
+# Installed before COPY requirements.txt so this layer is only invalidated
+# when the pinned version changes, not on every code or dep change.
+RUN pip install --no-cache-dir --prefix=/install "sentence-transformers==3.4.1"
+
+# Layer B — remaining application dependencies (fast, no torch).
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN grep -v "sentence-transformers" requirements.txt | \
+    pip install --no-cache-dir --prefix=/install -r /dev/stdin
 
 # ── Stage 2: lean runtime image ───────────────────────────────────────────────
 FROM python:3.12-slim

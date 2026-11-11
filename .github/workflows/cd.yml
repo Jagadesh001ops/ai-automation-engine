@@ -169,6 +169,7 @@ jobs:
     name: Deploy to production
     needs: gate
     runs-on: ubuntu-latest
+    if: ${{ secrets.DEPLOY_HOST != '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -220,7 +221,7 @@ jobs:
   rollback:
     name: Rollback on deploy failure
     needs: deploy
-    if: failure()
+    if: failure() && ${{ secrets.DEPLOY_HOST != '' }}
     runs-on: ubuntu-latest
 
     steps:

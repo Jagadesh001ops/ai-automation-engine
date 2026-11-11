@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, "claude/**"]
+    branches: [main, forge, "claude/**"]
   pull_request:
-    branches: [main]
+    branches: [main, forge]
 
 jobs:
   lint:
@@ -21,7 +21,7 @@ jobs:
           cache: pip
 
       - name: Install ruff
-        run: pip install ruff==0.11.13
+        run: pip install ruff==0.17.4
 
       - name: Ruff — check Python
         run: ruff check engine/ api.py tests/
@@ -70,8 +70,10 @@ jobs:
           --health-retries 5
 
     env:
-      DATABASE_URL: postgresql://ci_user:${{ secrets.CI_DB_PASSWORD }}@localhost:5432/testdb
-      REDIS_URL: redis://localhost:6379
+      # Use 127.0.0.1 not localhost — Ubuntu 26+ resolves localhost→::1 (IPv6)
+      # while service containers listen on 127.0.0.1 (IPv4), causing "socket refused".
+      DATABASE_URL: postgresql://ci_user:${{ secrets.CI_DB_PASSWORD }}@127.0.0.1:5432/testdb
+      REDIS_URL: redis://127.0.0.1:6379
       # No SUPABASE_JWT_SECRET → auth runs in dev-bypass mode
       # No GROQ_API_KEY → LLM calls are mocked in tests
 
@@ -82,10 +84,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
+          cache: pip  # caches pip download cache keyed on requirements.txt hash
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt pytest-cov python-multipart
+      - name: Install dependencies (CI — skip heavy ML packages)
+        run: |
+          # sentence-transformers pulls in torch (~2 GB) — engine.embeddings.embed_batch
+          # is mocked in every test, so the model is never loaded in CI.
+          # Strip it here; prod Docker image installs the full requirements.txt.
+          grep -v "sentence-transformers" requirements.txt > /tmp/requirements-ci.txt
+          pip install -r /tmp/requirements-ci.txt
 
       - name: Run tests with branch coverage
         run: |
